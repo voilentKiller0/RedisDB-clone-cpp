@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -12,19 +13,75 @@
 
 using namespace std;
 
-static void do_something(int connfd) {
-    while (true) {  // Keep listening for messages from this client
-        char rbuf[64] = {};
-        ssize_t n = read(connfd, rbuf, sizeof(rbuf) - 1);
-        if (n <= 0) {  // Client closed connection or error
-            break;
-        }
-        cout << "client says: " << rbuf << endl;
+const size_t k_max_msg = 4096;
 
-        char wbuf[] = "got it !!";
-        write(connfd, wbuf, strlen(wbuf));
-    }
-    close(connfd);  // Close the connection when client disconnects
+int32_t read_full(int conn_fd, char *buff, size_t n){
+	while (n > 0){
+		ssize_t rv = read(conn_fd, buff, n);
+		if (rv <= 0){
+			return -1; // return -1 when i got enexpcted EOF or error
+		}
+		assert((size_t)rv <= n);
+		n -= size_t(rv);
+		buff += rv;
+	}
+	return 0;
+}
+
+int32_t write_full(int conn_fd, const char *buff, size_t n){
+	while (n > 0){
+		ssize_t wv = write(conn_fd, buff, n);
+		if (wv <= 0){
+			return -1; // error
+		}
+		assert((size_t)wv <= n);
+		n -= (size_t)wv;
+		buff += wv;
+	}
+	return 0;
+}
+
+int32_t one_request(int conn_fd){
+	// 4 bytes header
+	char rbuff[4+k_max_msg+1];
+	errno = 0;
+	if (int32_t err = read_full(conn_fd, rbuff, 4)){
+		if (err == 0){
+			cout << "EOF detected" << endl;
+		}else{
+			throw runtime_error("Error in read()");
+		}
+		return err;
+	}		
+	uint32_t len = 0;
+	memcpy(&len, rbuff, 4);
+	if (len > k_max_msg){
+		throw runtime_error("Message length is too long...");
+	}
+
+
+	// request body
+	if (int32_t err = read_full(conn_fd, &rbuff[4], len)){
+		if (err == 0){
+			cout << "EOF detected" << endl;
+		}else{
+			throw runtime_error("Error in read()");
+		}
+		return err;
+	}
+
+
+	// do something
+	rbuff[4+len] = '\0';
+	cout << "client says: " << &rbuff[4] << endl;
+
+	const char reply[] = "THIS MESSAGE FROM SERVER OK !!";
+
+	char wbuff[4+sizeof(reply)];
+	len = (uint32_t)strlen(reply);
+	memcpy(wbuff, &len, 4);
+	memcpy(&wbuff[4], reply, len);
+	return write_full(conn_fd, wbuff, 4+len);
 }
 
 
@@ -75,7 +132,12 @@ int main(){
 				continue;   // error
 			}
 
-			do_something(connfd);			
+			while (true){
+				int32_t err = one_request(connfd);
+				if (err){
+					break;
+				}
+			}		
 		}
 		close(create_socket);
 
