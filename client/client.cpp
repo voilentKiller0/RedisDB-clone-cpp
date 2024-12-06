@@ -13,13 +13,6 @@
 
 using namespace std;
 
-static void die(const char *msg)
-{
-    int err = errno;
-    fprintf(stderr, "[%d] %s\n", err, msg);
-    abort();
-}
-
 int main()
 {
     try
