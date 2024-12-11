@@ -1,19 +1,25 @@
-#include <stdint.h>
 #include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <iostream>
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
-#include <iostream>
-#include <stdexcept>
-#include <vector>
 
-using namespace std;
-const size_t k_max_msg = 4096;
+
+static void msg(const char *msg) {
+    fprintf(stderr, "%s\n", msg);
+}
+
+static void die(const char *msg) {
+    int err = errno;
+    fprintf(stderr, "[%d] %s\n", err, msg);
+    abort();
+}
 
 static int32_t read_full(int fd, char *buf, size_t n) {
     while (n > 0) {
@@ -41,98 +47,92 @@ static int32_t write_all(int fd, const char *buf, size_t n) {
     return 0;
 }
 
+const size_t k_max_msg = 4096;
 
-static int32_t query(int fd, const char *text){
-    // send the message
-    uint32_t len = (uint32_t) strlen(text);
-    if (len > k_max_msg){
-        throw runtime_error("Message length is too long");
-    }
-    char wbuff[4 + k_max_msg];
-    memcpy(wbuff, &len, 4);
-    memcpy(&wbuff[4], text, len);
-    if (int32_t err = write_all(fd, wbuff, 4 + len)) {
-        return err;
+// the `query` function was simply splited into `send_req` and `read_res`.
+static int32_t send_req(int fd, const char *text) {
+    uint32_t len = (uint32_t)strlen(text);
+    if (len > k_max_msg) {
+        return -1;
     }
 
+    char wbuf[4 + k_max_msg];
+    memcpy(wbuf, &len, 4);  // assume little endian
+    memcpy(&wbuf[4], text, len);
+    return write_all(fd, wbuf, 4 + len);
+}
 
-    // recieve the message
-    char rbuff[4 + k_max_msg + 1];
+static int32_t read_res(int fd) {
+    // 4 bytes header
+    char rbuf[4 + k_max_msg + 1];
     errno = 0;
-    int32_t err = read_full(fd, rbuff, 4);
-    if (err){
-        if (err == 0){
-            cout << "Unexpected EOF read" << endl;
-        }else{
-            throw runtime_error("Error in read()");
+    int32_t err = read_full(fd, rbuf, 4);
+    if (err) {
+        if (errno == 0) {
+            msg("EOF");
+        } else {
+            msg("read() error");
         }
         return err;
     }
-    memcpy(&len, rbuff, 4);
-    if (len > k_max_msg){
-        throw runtime_error("Message is too long");
+
+    uint32_t len = 0;
+    memcpy(&len, rbuf, 4);  // assume little endian
+    if (len > k_max_msg) {
+        msg("too long");
+        return -1;
     }
-    err = read_full(fd, &rbuff[4], len);
-    if (err){
-        if (err == 0){
-            cout << "Unexpected EOF read" << endl;
-        }else{
-            throw runtime_error("Error in read()");
-        }
+
+    // reply body
+    err = read_full(fd, &rbuf[4], len);
+    if (err) {
+        msg("read() error");
         return err;
     }
+
     // do something
-    rbuff[4 + len] = '\0';
-    cout << "Server says : " << &rbuff[4] << endl;
+    rbuf[4 + len] = '\0';
+    printf("server says: %s\n", &rbuf[4]);
     return 0;
 }
 
-int main()
-{
-    try
-    {
-
-        /*AF_INET: Specifies IPv4 Internet protocols
-        SOCK_STREAM: Specifies TCP connection type
-        0: Lets the system choose the appropriate protocol (TCP in this case)*/
-        int conn_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (conn_fd < 0)
-        {
-            throw runtime_error("Socket is not able to create. Status : " + to_string(conn_fd));
-        }
-
-        struct sockaddr_in addr = {};
-        addr.sin_family = AF_INET;
-        addr.sin_port = ntohs(1234);
-        addr.sin_addr.s_addr = ntohl(INADDR_LOOPBACK); // 127.0.0.1
-        int rv = connect(conn_fd, (const struct sockaddr *)&addr, sizeof(addr));
-        if (rv)
-        {
-            throw runtime_error("Unable to bind the socket. Status : " + to_string(rv));
-        }
-
-        // send Multiple request
-
-        while (true){
-            string msg;
-            getline(cin, msg);
-            if (msg == "n"){
-                break;
-            }
-            int n = msg.length();
-            char arr_msg[n+1];
-            strcpy(arr_msg, msg.c_str()); 
-            arr_msg[n] = '\0';
-            int32_t err = query(conn_fd, arr_msg);
-            if (err < 0){
-                break;
-            }
-        }
-        close(conn_fd);
+int main() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        die("socket()");
     }
-    catch (const exception &e)
-    {
-        cout << "Exception " << e.what() << endl;
+
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = ntohs(1234);
+    addr.sin_addr.s_addr = ntohl(INADDR_LOOPBACK);  // 127.0.0.1
+    int rv = connect(fd, (const struct sockaddr *)&addr, sizeof(addr));
+    if (rv) {
+        die("connect");
     }
+
+    // multiple pipelined requests
+    // const char *query_list[3] = {"hello1", "hello2", "hello3"};
+    
+    while (true) {
+        char msg[32];
+        std::cin.getline(msg, 32); 
+        if (strcmp(msg, "n") == 0){
+            break;
+        }
+        int32_t err = send_req(fd, msg);
+        if (err) {
+            goto L_DONE;
+        }
+    }
+    for (size_t i = 0; i < 3; ++i) {
+        int32_t err = read_res(fd);
+        if (err) {
+            goto L_DONE;
+        }
+    }
+
+L_DONE:
+    close(fd);
     return 0;
 }
